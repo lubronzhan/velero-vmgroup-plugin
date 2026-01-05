@@ -1,0 +1,112 @@
+# Example VirtualMachineGroup with VMs that have secrets and PVCs
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vm-demo
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vm-1-cloud-init
+  namespace: vm-demo
+stringData:
+  user-data: |
+    #cloud-config
+    users:
+      - name: admin
+        sudo: ALL=(ALL) NOPASSWD:ALL
+        ssh_authorized_keys:
+          - ssh-rsa AAAAB3NzaC1yc2E...
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vm-2-cloud-init
+  namespace: vm-demo
+stringData:
+  user-data: |
+    #cloud-config
+    users:
+      - name: admin
+        sudo: ALL=(ALL) NOPASSWD:ALL
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vm-1-data
+  namespace: vm-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vm-2-data
+  namespace: vm-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+
+---
+apiVersion: vmoperator.vmware.com/v1alpha5
+kind: VirtualMachine
+metadata:
+  name: vm-1
+  namespace: vm-demo
+spec:
+  className: best-effort-small
+  imageName: photon-os-5
+  powerState: poweredOn
+  bootstrap:
+    cloudInit:
+      rawCloudConfig:
+        name: vm-1-cloud-init
+        key: user-data
+  volumes:
+    - name: data-volume
+      persistentVolumeClaim:
+        claimName: vm-1-data
+
+---
+apiVersion: vmoperator.vmware.com/v1alpha5
+kind: VirtualMachine
+metadata:
+  name: vm-2
+  namespace: vm-demo
+spec:
+  className: best-effort-medium
+  imageName: photon-os-5
+  powerState: poweredOn
+  bootstrap:
+    cloudInit:
+      rawCloudConfig:
+        name: vm-2-cloud-init
+        key: user-data
+  volumes:
+    - name: data-volume
+      persistentVolumeClaim:
+        claimName: vm-2-data
+
+---
+apiVersion: vmoperator.vmware.com/v1alpha5
+kind: VirtualMachineGroup
+metadata:
+  name: my-vm-group
+  namespace: vm-demo
+spec:
+  bootOrder:
+  - members:
+    - name: vm-1
+    - name: vm-2

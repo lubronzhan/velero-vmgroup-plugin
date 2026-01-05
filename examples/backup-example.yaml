@@ -1,0 +1,22 @@
+# Example Velero backup that will trigger the VMGroup plugin
+---
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: vmgroup-backup
+  namespace: velero
+spec:
+  # Include the namespace with VirtualMachineGroups
+  includedNamespaces:
+    - vm-demo
+
+  # Optionally, only backup VirtualMachineGroups and let the plugin
+  # handle the dependencies
+  # includedResources:
+  #   - virtualmachinegroups.vmoperator.vmware.com
+
+  # Use your configured backup storage location
+  storageLocation: default
+
+  # Optional: TTL for the backup
+  ttl: 720h0m0s

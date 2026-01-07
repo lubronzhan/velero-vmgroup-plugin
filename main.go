@@ -18,24 +18,23 @@ package main
 
 import (
 	"github.com/sirupsen/logrus"
+
 	"github.com/vmware-tanzu/velero/pkg/plugin/framework"
-	"k8s.io/client-go/rest"
 
 	"github.com/lubronzhan/velero-vmgroup-plugin/pkg/plugin"
 )
 
 func main() {
 	framework.NewServer().
-		RegisterBackupItemAction("lubronzhan.io/vmgroup-backup", newVMGroupBackupPlugin).
+		RegisterRestoreItemAction("lubronzhan.io/vm-restore", newVMRestorePlugin).
+		RegisterRestoreItemAction("lubronzhan.io/pvc-restore", newPVCRestorePlugin).
 		Serve()
 }
 
-func newVMGroupBackupPlugin(logger logrus.FieldLogger) (interface{}, error) {
-	// Get Kubernetes config
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		return nil, err
-	}
+func newVMRestorePlugin(logger logrus.FieldLogger) (interface{}, error) {
+	return plugin.NewVMRestoreItemAction(logger), nil
+}
 
-	return plugin.NewVMGroupBackupItemAction(logger, config)
+func newPVCRestorePlugin(logger logrus.FieldLogger) (interface{}, error) {
+	return plugin.NewPVCRestoreItemAction(logger), nil
 }

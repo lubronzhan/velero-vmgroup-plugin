@@ -42,8 +42,8 @@ velero-vmgroup-plugin/
 ├── main.go                              # Plugin entry point
 ├── pkg/
 │   └── plugin/
-│       ├── vmgroup_backup.go            # Basic implementation
-│       └── vmgroup_backup_with_client.go # Full implementation with K8s client
+│       ├── vmgroup_restore.go           # VM restore plugin
+│       └── pvc_restore.go               # PVC restore plugin
 ├── examples/                            # Example manifests
 │   ├── vmgroup-example.yaml
 │   ├── backup-example.yaml
@@ -56,13 +56,11 @@ velero-vmgroup-plugin/
 
 ## Plugin Implementation
 
-The plugin (`pkg/plugin/vmgroup_backup.go`) provides complete functionality:
-- Uses controller-runtime client to fetch VirtualMachine resources
-- Extracts bootstrap secrets from VM specs
-- Extracts PVCs from VM volumes
+The plugin provides restore functionality:
+- **VM Restore Plugin** (`pkg/plugin/vmgroup_restore.go`): Ensures VirtualMachineGroup is restored before VMs, removes cluster-specific fields
+- **PVC Restore Plugin** (`pkg/plugin/pvc_restore.go`): Removes cluster-specific annotations from PVCs
+- Uses VM Operator API types for type safety
 - Handles errors gracefully with detailed logging
-
-The plugin automatically gets the Kubernetes configuration from the in-cluster config when running inside the Velero pod.
 
 ## Building and Testing
 
@@ -127,45 +125,54 @@ kubectl get virtualmachinegroup,virtualmachine,secret,pvc -n vm-demo
 ### 3. Create a Backup
 
 ```bash
-# Create backup
+# Create backup (using standard Velero or another backup plugin)
 velero backup create test-backup --include-namespaces vm-demo
 
 # Check backup status
 velero backup describe test-backup
-
-# View detailed backup contents
-velero backup describe test-backup --details
-
-# Check logs
-velero backup logs test-backup
 ```
 
-### 4. Verify Plugin Execution
-
-Check that all dependencies were backed up:
+### 4. Test Restore
 
 ```bash
-velero backup describe test-backup --details | grep -E "(VirtualMachine|Secret|PersistentVolumeClaim)"
-```
-
-Expected output should include:
-- VirtualMachineGroup: `my-vm-group`
-- VirtualMachines: `vm-1`, `vm-2`
-- Secrets: `vm-1-cloud-init`, `vm-2-cloud-init`
-- PVCs: `vm-1-data`, `vm-2-data`
-
-### 5. Test Restore
-
-```bash
-# Delete the namespace
+# Delete test resources
 kubectl delete namespace vm-demo
 
-# Restore from backup
-velero restore create --from-backup test-backup
+# Create restore
+velero restore create test-restore --from-backup test-backup
 
-# Verify restoration
-kubectl get all,secret,pvc,virtualmachine,virtualmachinegroup -n vm-demo
+# Check restore status
+velero restore describe test-restore
+
+# View restore logs
+velero restore logs test-restore
+
+# Verify plugin execution
+velero restore logs test-restore | grep -E "(Removing|Processing|VirtualMachineGroup)"
 ```
+
+### 5. Verify Plugin Execution
+
+Check that resources were restored correctly:
+
+```bash
+# Check resources exist
+kubectl get vmgroup,vm,pvc -n vm-demo
+
+# Verify cluster-specific fields were removed
+kubectl get vm -n vm-demo -o yaml | grep -E "(instanceUUID|first-boot-done)"
+# (should return nothing)
+
+kubectl get pvc -n vm-demo -o yaml | grep volumehealth
+# (should return nothing)
+```
+
+Expected restore logs should include:
+- "Processing VirtualMachine vm-demo/vm-1"
+- "Removing instanceUUID from VM vm-demo/vm-1"
+- "Removing first-boot-done annotation from VM vm-demo/vm-1"
+- "Processing PVC vm-demo/vm-1-data"
+- "Removing volumehealth annotation from PVC vm-demo/vm-1-data"
 
 ## Debugging
 
@@ -203,28 +210,31 @@ kubectl get pods -n velero -l component=velero
 
 #### API Version Mismatch
 
-If you see errors about API versions, update the version in `vmgroup_backup_with_client.go`:
+If you see errors about API versions, update the version in `vmgroup_restore.go`:
 
 ```go
-vmGVR := schema.GroupVersionResource{
-    Group:    "vmoperator.vmware.com",
-    Version:  "v1alpha5", // Update this
-    Resource: "virtualmachines",
-}
+import vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
+// Change v1alpha5 to match your VM Operator version
 ```
 
-#### Missing Dependencies
+#### Resources Not Being Modified
 
-If VMs or secrets aren't being backed up:
+If cluster-specific fields aren't being removed during restore:
 
 1. Check that the plugin is being invoked:
    ```bash
-   velero backup logs <backup-name> | grep "Executing VMGroup"
+   velero restore logs <restore-name> | grep "Removing"
    ```
 
-2. Verify the VirtualMachineGroup structure matches expected format
+2. Verify the plugin is registered:
+   ```bash
+   velero plugin get
+   ```
 
-3. Check for errors in Velero logs
+3. Check for errors in restore logs:
+   ```bash
+   velero restore logs <restore-name>
+   ```
 
 ## Code Style
 

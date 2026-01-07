@@ -1,0 +1,44 @@
+# This ConfigMap is NOT NEEDED with this plugin!
+# The plugin implements these modifications in code.
+# This file is provided for reference only.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: resourcemodifiers
+  namespace: velero
+data:
+  post-setup.yaml: |
+    version: v1
+    resourceModifierRules:
+    # Remove volume health annotation from PVCs
+    - conditions:
+        groupResource: persistentvolumeclaims
+      patches:
+      - operation: remove
+        path: "/metadata/annotations/volumehealth.storage.kubernetes.io~1health"
+
+    # Remove cluster-specific fields from VirtualMachines
+    - conditions:
+        groupResource: virtualmachines.vmoperator.vmware.com
+      patches:
+      - operation: remove
+        path: "/spec/instanceUUID"
+      - operation: remove
+        path: "/metadata/annotations/virtualmachine.vmoperator.vmware.com~1first-boot-done"
+
+---
+# Note: The above ConfigMap approach has been replaced by code-based
+# restore plugins in this project:
+#
+# 1. pkg/plugin/pvc_restore.go - handles PVC modifications
+# 2. pkg/plugin/vmgroup_restore.go - handles VM modifications
+#
+# Benefits of code-based approach:
+# ✅ Type safety (compile-time checking)
+# ✅ Better logging (see exactly what's being modified)
+# ✅ Easier to test (standard Go unit tests)
+# ✅ More flexible (full programming capabilities)
+# ✅ Easier to maintain (code > YAML patches)
+#
+# See docs/RESOURCE_MODIFIERS.md for details.

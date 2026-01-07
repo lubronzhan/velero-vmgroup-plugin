@@ -109,4 +109,5 @@ spec:
   bootOrder:
   - members:
     - name: vm-1
+  - members:
     - name: vm-2

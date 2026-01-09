@@ -19,6 +19,8 @@ limitations under the License.
 package plugin
 
 import (
+	"strings"
+
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
@@ -61,12 +63,18 @@ func (p *PVCRestoreItemAction) Execute(input *veleroplugin.RestoreItemActionExec
 
 	p.log.Infof("Processing PVC %s/%s", pvc.Namespace, pvc.Name)
 
-	// Remove volume health annotation
-	// This annotation is cluster-specific and shouldn't be restored
 	if pvc.Annotations != nil {
+		// Remove volume health annotation
 		if _, exists := pvc.Annotations["volumehealth.storage.kubernetes.io/health"]; exists {
 			p.log.Infof("Removing volumehealth annotation from PVC %s/%s", pvc.Namespace, pvc.Name)
 			delete(pvc.Annotations, "volumehealth.storage.kubernetes.io/health")
+		}
+		for key := range pvc.Annotations {
+			// Remove annotation key with prefix cns.vmware.com/usedby-vm-
+			if strings.HasPrefix(key, "cns.vmware.com/usedby-vm-") {
+				p.log.Infof("Removing annotation %s from PVC %s/%s", key, pvc.Namespace, pvc.Name)
+				delete(pvc.Annotations, key)
+			}
 		}
 	}
 

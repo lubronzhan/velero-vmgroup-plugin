@@ -52,49 +52,56 @@ func (p *VMRestoreItemAction) AppliesTo() (veleroplugin.ResourceSelector, error)
 // Execute performs the restore action
 // This plugin:
 // 1. Removes cluster-specific fields that shouldn't be restored
-// 2. Adds the VirtualMachineGroup as an additional item to restore first
+// 2. Injects network configuration from status to spec to preserve IP addresses
+// 3. Adds the VirtualMachineGroup as an additional item to restore first
 func (p *VMRestoreItemAction) Execute(input *veleroplugin.RestoreItemActionExecuteInput) (*veleroplugin.RestoreItemActionExecuteOutput, error) {
 	p.log.Infof("Executing VMRestoreItemAction for restore %s", input.Restore.Name)
 
-	// Convert unstructured to VirtualMachine
-	vm := &vmopv1.VirtualMachine{}
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(input.Item.UnstructuredContent(), vm); err != nil {
-		return nil, errors.Wrap(err, "failed to convert item to VirtualMachine")
-	}
+	// Work with unstructured data directly for more flexibility
+	obj := input.Item.UnstructuredContent()
 
-	namespace := vm.Namespace
-	vmName := vm.Name
+	// Get metadata
+	namespace, _, _ := unstructured.NestedString(obj, "metadata", "namespace")
+	vmName, _, _ := unstructured.NestedString(obj, "metadata", "name")
+
 	p.log.Infof("Processing VirtualMachine %s/%s", namespace, vmName)
 
-	// Remove cluster-specific fields that shouldn't be restored
 	modified := false
 
 	// 1. Remove instanceUUID - this is cluster-specific and will be regenerated
-	if vm.Spec.InstanceUUID != "" {
+	if instanceUUID, found, _ := unstructured.NestedString(obj, "spec", "instanceUUID"); found && instanceUUID != "" {
 		p.log.Infof("Removing instanceUUID from VM %s/%s", namespace, vmName)
-		vm.Spec.InstanceUUID = ""
+		unstructured.SetNestedField(obj, "", "spec", "instanceUUID")
 		modified = true
 	}
 
 	// 2. Remove first-boot-done annotation - VM should go through first boot again
-	if vm.Annotations != nil {
-		if _, exists := vm.Annotations["virtualmachine.vmoperator.vmware.com/first-boot-done"]; exists {
+	if annotations, found, _ := unstructured.NestedStringMap(obj, "metadata", "annotations"); found {
+		if _, exists := annotations["virtualmachine.vmoperator.vmware.com/first-boot-done"]; exists {
 			p.log.Infof("Removing first-boot-done annotation from VM %s/%s", namespace, vmName)
-			delete(vm.Annotations, "virtualmachine.vmoperator.vmware.com/first-boot-done")
+			delete(annotations, "virtualmachine.vmoperator.vmware.com/first-boot-done")
+			unstructured.SetNestedStringMap(obj, annotations, "metadata", "annotations")
 			modified = true
 		}
 	}
 
-	// Convert back to unstructured if we made modifications
+	// 3. Inject network configuration from status.network.config to spec.network
+	if p.injectNetworkConfigFromStatus(obj, namespace, vmName) {
+		modified = true
+	}
+
+	// Use the modified object
 	var updatedItem runtime.Unstructured
 	if modified {
-		unstructuredVM, err := runtime.DefaultUnstructuredConverter.ToUnstructured(vm)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to convert VM to unstructured")
-		}
-		updatedItem = &unstructured.Unstructured{Object: unstructuredVM}
+		updatedItem = &unstructured.Unstructured{Object: obj}
 	} else {
 		updatedItem = input.Item
+	}
+
+	// Convert to typed object to get groupName
+	vm := &vmopv1.VirtualMachine{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj, vm); err != nil {
+		return nil, errors.Wrap(err, "failed to convert item to VirtualMachine")
 	}
 
 	// Check if this VM belongs to a VirtualMachineGroup
@@ -124,4 +131,40 @@ func (p *VMRestoreItemAction) Execute(input *veleroplugin.RestoreItemActionExecu
 	}
 
 	return output, nil
+}
+
+// injectNetworkConfigFromStatus copies network configuration from status.network.config to spec.network
+// This preserves the original IP address during restore
+func (p *VMRestoreItemAction) injectNetworkConfigFromStatus(obj map[string]interface{}, namespace, vmName string) bool {
+	// Check if spec.network already exists
+	if specNetwork, found, _ := unstructured.NestedMap(obj, "spec", "network"); found && specNetwork != nil {
+		p.log.Infof("VM %s/%s already has spec.network configuration - preserving as-is", namespace, vmName)
+		return false
+	}
+
+	// Get status.network.config
+	statusNetworkConfig, found, err := unstructured.NestedMap(obj, "status", "network", "config")
+	if !found || err != nil {
+		p.log.Warnf("VM %s/%s has no status.network.config - cannot inject network config", namespace, vmName)
+		return false
+	}
+
+	// Get primary IP for logging
+	primaryIP, _, _ := unstructured.NestedString(obj, "status", "network", "primaryIP4")
+
+	p.log.Infof("Injecting network configuration for VM %s/%s with IP %s", namespace, vmName, primaryIP)
+
+	// Copy status.network.config to spec.network
+	// This preserves the exact network configuration including:
+	// - interfaces with IP addresses
+	// - DNS settings
+	// - gateway configuration
+	if err := unstructured.SetNestedMap(obj, statusNetworkConfig, "spec", "network"); err != nil {
+		p.log.Errorf("Failed to inject network config for VM %s/%s: %v", namespace, vmName, err)
+		return false
+	}
+
+	p.log.Infof("VM %s/%s network config injected successfully - IP %s will be preserved", namespace, vmName, primaryIP)
+
+	return true
 }

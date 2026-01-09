@@ -1,24 +1,27 @@
-# Velero VM Restore Plugin
+# Velero VM Group Plugin
 
-A Velero restore plugin for VMware VM Operator VirtualMachine and VirtualMachineGroup custom resources.
+A Velero backup plugin for backing up VMware VM Operator VirtualMachineGroup custom resources along with their dependencies.
 
 ## Overview
 
-This plugin extends Velero to properly restore VM Operator resources by:
+This plugin extends Velero to properly backup VirtualMachineGroup CRs (`virtualmachinegroups.vmoperator.vmware.com`) by automatically including:
 
-1. **Ensuring correct restore order**: VirtualMachineGroup is restored before VirtualMachines
-2. **Automatic resource cleanup**: Removes cluster-specific fields during restore
+1. **VirtualMachine members** - All VMs referenced in `vmg.spec.bootOrder.members`
+2. **Bootstrap secrets** - Secrets referenced by `vm.spec.bootstrap.cloudInit.rawCloudConfig.name`
+3. **Persistent Volume Claims** - PVCs referenced by `vm.spec.volumes[x].persistentVolumeClaim.claimName`
 
 ## Features
 
+- Automatically discovers and backs up VirtualMachine resources that are members of a VirtualMachineGroup
+- Backs up bootstrap secrets used for cloud-init configuration
+- Backs up all PVCs attached to the VirtualMachines
 - **Ensures correct restore order**: VirtualMachineGroup is restored before VirtualMachines
 - **Automatic resource cleanup**: Removes cluster-specific fields during restore
   - Removes `instanceUUID` from VirtualMachines
   - Removes `first-boot-done` annotation from VirtualMachines
   - Removes `volumehealth` annotation from PVCs
 - Supports VM Operator API v1alpha5
-- Works with standard Velero restore workflows
-- Type-safe implementation using VM Operator API types
+- Works with standard Velero backup workflows
 
 ## Prerequisites
 
@@ -79,26 +82,61 @@ You should see output similar to:
 
 ```
 NAME                                    KIND
+lubronzhan.io/vmgroup-backup           BackupItemAction
 lubronzhan.io/vm-restore               RestoreItemAction
 lubronzhan.io/pvc-restore              RestoreItemAction
 ```
 
 ## Usage
 
-Once the plugin is installed, it will automatically be invoked when restoring VirtualMachine and PVC resources.
+Once the plugin is installed, it will automatically be invoked when backing up VirtualMachineGroup resources.
+
+### Create a backup including VirtualMachineGroups
+
+```bash
+# Backup all resources in a namespace
+velero backup create my-vmgroup-backup --include-namespaces my-namespace
+
+# Backup only VirtualMachineGroups and their dependencies
+velero backup create my-vmgroup-backup \
+  --include-resources virtualmachinegroups.vmoperator.vmware.com \
+  --include-namespaces my-namespace
+```
+
+### Example VirtualMachineGroup
+
+```yaml
+apiVersion: vmoperator.vmware.com/v1alpha5
+kind: VirtualMachineGroup
+metadata:
+  name: my-vm-group
+  namespace: my-namespace
+spec:
+  bootOrder:
+    members:
+      - name: vm-1
+      - name: vm-2
+      - name: vm-3
+```
+
+When backing up this VirtualMachineGroup, the plugin will automatically include:
+- The VirtualMachineGroup itself
+- VirtualMachines: `vm-1`, `vm-2`, `vm-3`
+- Any Secrets referenced by these VMs' cloud-init configuration
+- Any PVCs attached to these VMs
 
 ### Restore
 
 Restoring works with standard Velero restore commands:
 
 ```bash
-velero restore create --from-backup my-backup
+velero restore create --from-backup my-vmgroup-backup
 ```
 
 **Restore Order**: The plugin ensures resources are restored in the correct order:
 1. Namespace
-2. Secrets
-3. PVCs - **cluster-specific annotations removed**
+2. Secrets (cloud-init configs)
+3. PVCs (persistent storage) - **cluster-specific annotations removed**
 4. **VirtualMachineGroup** (restored first)
 5. **VirtualMachines** (wait for VMGroup to be ready) - **cluster-specific fields removed**
 
@@ -108,11 +146,24 @@ This ordering is automatically enforced by the restore plugin - no manual interv
 - VirtualMachines: `instanceUUID`, `first-boot-done` annotation
 - PVCs: `volumehealth` annotation
 
-This is equivalent to using Velero's resource modifiers ConfigMap, but implemented in code for better type safety and logging.
+This is equivalent to using Velero's resource modifiers ConfigMap, but implemented in code for better type safety and logging. See [docs/RESOURCE_MODIFIERS.md](docs/RESOURCE_MODIFIERS.md) for details.
 
 ## Architecture
 
-The plugin implements Velero Restore Item Action interfaces:
+The plugin implements two Velero plugin interfaces:
+
+### Backup Item Action (`vmgroup_backup.go`)
+
+1. Watches for `virtualmachinegroups.vmoperator.vmware.com` resources during backup
+2. Converts the unstructured item to typed `VirtualMachineGroup` using VM Operator API
+3. Iterates through `spec.bootOrder.members` to get VirtualMachine names
+4. Uses controller-runtime client to fetch each typed `VirtualMachine`
+5. **Adds tracking label** `vmgroup.vmoperator.vmware.com/name` to each VM
+6. Extracts Secret references directly from `vm.Spec.Bootstrap.CloudInit.RawCloudConfig.Name`
+7. Extracts PVC references directly from `vm.Spec.Volumes[x].PersistentVolumeClaim.ClaimName`
+8. Returns these resources as additional items to be backed up by Velero
+
+### Restore Item Actions
 
 #### VM Restore Plugin (`vmgroup_restore.go`)
 
@@ -134,10 +185,22 @@ The plugin implements Velero Restore Item Action interfaces:
 ### Type Safety
 
 The plugin uses VM Operator API types directly instead of unstructured objects:
+- `vmopv1.VirtualMachineGroup` for VM groups
 - `vmopv1.VirtualMachine` for VMs
-- `corev1.PersistentVolumeClaim` for PVCs
 - Direct field access with compile-time type checking
 - No manual type assertions or nested map traversals
+
+## Implementation
+
+The plugin provides a complete, production-ready implementation (`pkg/plugin/vmgroup_backup.go`) that:
+
+- ✅ Uses VM Operator API types directly for type safety
+- ✅ Uses controller-runtime client to fetch VirtualMachine resources from the cluster
+- ✅ Automatically extracts and backs up all dependencies:
+  - Bootstrap secrets from `vm.spec.bootstrap.cloudInit.rawCloudConfig.name`
+  - PVCs from `vm.spec.volumes[x].persistentVolumeClaim.claimName`
+- ✅ Handles errors gracefully with detailed logging
+- ✅ Works with VM Operator API v1alpha5
 
 ## Development
 
@@ -153,8 +216,8 @@ The plugin uses VM Operator API types directly instead of unstructured objects:
 ├── main.go                             # Plugin entry point
 └── pkg/
     └── plugin/
-        ├── vmgroup_restore.go          # VM restore plugin
-        └── pvc_restore.go              # PVC restore plugin
+        ├── vmgroup_backup.go           # Basic plugin implementation
+        └── vmgroup_backup_with_client.go  # Full plugin implementation with K8s client
 ```
 
 ### Testing
@@ -163,22 +226,19 @@ To test the plugin locally:
 
 1. Build and push the plugin image
 2. Install it in your Velero deployment
-3. Create a backup with VirtualMachines and PVCs
-4. Run a Velero restore
-5. Verify resources are restored in correct order and cluster-specific fields are removed
+3. Create a test VirtualMachineGroup with VMs
+4. Run a Velero backup
+5. Check the backup contents to verify all dependencies are included
 
 ```bash
-# Create a restore
-velero restore create test-restore --from-backup test-backup
+# Create a backup
+velero backup create test-backup --include-namespaces test-ns
 
-# Check restore status
-velero restore describe test-restore --details
+# Check backup contents
+velero backup describe test-backup --details
 
 # Verify logs
-velero restore logs test-restore | grep -E "(Removing|Processing)"
-
-# Check resources
-kubectl get vmgroup,vm,pvc -n test-ns
+kubectl logs -n velero deployment/velero
 ```
 
 ## API References
@@ -203,7 +263,7 @@ Check Velero logs for errors:
 kubectl logs -n velero deployment/velero
 ```
 
-### Resources not being restored correctly
+### Resources not being backed up
 
 Enable debug logging in Velero:
 
@@ -212,20 +272,22 @@ kubectl edit deployment velero -n velero
 # Add --log-level=debug to the args
 ```
 
-Check the restore details:
+Check the backup details:
 
 ```bash
-velero restore describe <restore-name> --details
-velero restore logs <restore-name>
+velero backup describe <backup-name> --details
 ```
 
 ### API version mismatch
 
-If you're using a different version of VM Operator, update the API version in `pkg/plugin/vmgroup_restore.go`:
+If you're using a different version of VM Operator, update the API version in `pkg/plugin/vmgroup_backup_with_client.go`:
 
 ```go
-import vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
-// Change v1alpha5 to match your VM Operator version
+vmGVR := schema.GroupVersionResource{
+    Group:    "vmoperator.vmware.com",
+    Version:  "v1alpha5", // Change this to match your VM Operator version
+    Resource: "virtualmachines",
+}
 ```
 
 ## Contributing
